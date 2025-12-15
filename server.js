@@ -20,33 +20,148 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// ---- PAYMENT ROUTE ----
-app.post("/create-payment-intent", async (req, res) => {
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.json({ 
+    status: "OK", 
+    message: "FixMate Payment Backend is running",
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get("/", (req, res) => {
+  res.send("FixMate Payment Backend Running - Use /health for status");
+});
+
+// ---- PAYMENT ROUTES ----
+// Create Payment Intent
+app.post("/api/payments/create-intent", async (req, res) => {
   try {
-    const { amount, userId } = req.body;
+    const { bookingId, amount, customerId, providerId } = req.body;
 
+    console.log("Creating payment intent:", { bookingId, amount, customerId, providerId });
+
+    // Validate input
+    if (!bookingId || !amount || !customerId || !providerId) {
+      return res.status(400).json({ 
+        error: "Missing required fields: bookingId, amount, customerId, providerId" 
+      });
+    }
+
+    // Create Stripe payment intent
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: amount,
-      currency: "usd",
+      amount: Math.round(amount), // Amount in cents
+      currency: "lkr",
+      metadata: {
+        bookingId,
+        customerId,
+        providerId
+      },
+      automatic_payment_methods: {
+        enabled: true,
+      },
     });
 
-    await db.collection("payments").add({
-      userId,
-      amount,
-      status: "pending",
-      createdAt: new Date(),
+    console.log("Payment intent created:", paymentIntent.id);
+
+    res.json({
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+      publishableKey: process.env.STRIPE_PUBLISHABLE_KEY
     });
-
-    res.json({ clientSecret: paymentIntent.client_secret });
-
   } catch (error) {
-    console.log(error);
+    console.error("Error creating payment intent:", error);
     res.status(500).json({ error: error.message });
   }
 });
 
-app.get("/", (req, res) => {
-  res.send("FixMate Payment Backend Running");
+// Confirm Payment
+app.post("/api/payments/confirm", async (req, res) => {
+  try {
+    const { paymentIntentId, bookingId } = req.body;
+
+    console.log("Confirming payment:", { paymentIntentId, bookingId });
+
+    // Retrieve payment intent from Stripe
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+    if (paymentIntent.status === "succeeded") {
+      // Update booking status in Firestore
+      await db.collection("bookings").doc(bookingId).update({
+        status: "COMPLETED",
+        "pricing.paymentStatus": "COMPLETED",
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      // Create payment record
+      await db.collection("payments").add({
+        bookingId,
+        paymentIntentId,
+        amount: paymentIntent.amount / 100,
+        currency: paymentIntent.currency,
+        status: "COMPLETED",
+        method: "CARD",
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      console.log("Payment confirmed and booking updated");
+
+      res.json({
+        success: true,
+        message: "Payment confirmed successfully",
+        paymentStatus: "COMPLETED",
+        bookingStatus: "COMPLETED"
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        message: `Payment status is ${paymentIntent.status}`
+      });
+    }
+  } catch (error) {
+    console.error("Error confirming payment:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Process Cash Payment
+app.post("/api/payments/cash", async (req, res) => {
+  try {
+    const { bookingId, amount, customerId, providerId } = req.body;
+
+    console.log("Processing cash payment:", { bookingId, amount, customerId, providerId });
+
+    // Update booking status
+    await db.collection("bookings").doc(bookingId).update({
+      status: "COMPLETED",
+      "pricing.paymentStatus": "COMPLETED",
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // Create payment record
+    const paymentRef = await db.collection("payments").add({
+      bookingId,
+      amount,
+      currency: "LKR",
+      status: "COMPLETED",
+      method: "CASH",
+      customerId,
+      providerId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    console.log("Cash payment processed:", paymentRef.id);
+
+    res.json({
+      success: true,
+      message: "Cash payment processed successfully",
+      paymentId: paymentRef.id,
+      bookingStatus: "COMPLETED"
+    });
+  } catch (error) {
+    console.error("Error processing cash payment:", error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
