@@ -49,8 +49,12 @@ app.post("/api/payments/create-intent", async (req, res) => {
     }
 
     // Create Stripe payment intent
+    // Convert amount to smallest currency unit (paisa for LKR)
+    // If amount is 408.00 LKR, we need 40800 paisa
+    const amountInSmallestUnit = Math.round(amount * 100);
+    
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(amount), // Amount in cents
+      amount: amountInSmallestUnit,
       currency: "lkr",
       metadata: {
         bookingId,
